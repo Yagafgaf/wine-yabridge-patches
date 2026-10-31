@@ -1,0 +1,82 @@
+From 7fb7f1fe057be5b2d14f50925596aa42508f26c3 Mon Sep 17 00:00:00 2001
+From: Yagafgaf <Yagafgaf@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 18:34:13 +0300
+Subject: [PATCH] dxgi: pace WaitForVBlank at 60 Hz and report frame statistics
+
+reFX Nexus 4 drives its UI render loop from IDXGIOutput::WaitForVBlank and
+polls GetFrameStatistics. Both were stubs (E_NOTIMPL), so the loop spun
+~1000/s and never produced a frame: parameter/preset changes updated the
+plugin state but the window was never repainted (a forced WM_PAINT drew
+the new state). Pace to a synthetic 60 Hz timeline and return increasing
+statistics; Nexus now repaints on state changes.
+---
+ dlls/dxgi/output.c | 43 +++++++++++++++++++++++++++++++++----------
+ 1 file changed, 33 insertions(+), 10 deletions(-)
+
+diff --git a/dlls/dxgi/output.c b/dlls/dxgi/output.c
+index e828ed0..efb187f 100644
+--- a/dlls/dxgi/output.c
++++ b/dlls/dxgi/output.c
+@@ -361,16 +361,29 @@ static HRESULT STDMETHODCALLTYPE dxgi_output_FindClosestMatchingMode(IDXGIOutput
+     return hr;
+ }
+ 
++/* wine-mao: pace WaitForVBlank to a synthetic 60 Hz timeline instead of returning
++ * E_NOTIMPL immediately. Some plugin UIs (reFX Nexus 4) run their render loop off this
++ * call; a stub makes the loop spin and never produce a frame. */
+ static HRESULT STDMETHODCALLTYPE dxgi_output_WaitForVBlank(IDXGIOutput6 *iface)
+ {
+-    static BOOL once = FALSE;
++    static LARGE_INTEGER freq, start;
++    LARGE_INTEGER now;
++    LONGLONG elapsed, period, next;
++    DWORD ms;
+ 
+-    if (!once++)
+-        FIXME("iface %p stub!\n", iface);
+-    else
+-        TRACE("iface %p stub!\n", iface);
+-
+-    return E_NOTIMPL;
++    if (!freq.QuadPart)
++    {
++        QueryPerformanceFrequency(&freq);
++        QueryPerformanceCounter(&start);
++    }
++    QueryPerformanceCounter(&now);
++    period = freq.QuadPart / 60;
++    elapsed = now.QuadPart - start.QuadPart;
++    next = (elapsed / period + 1) * period;
++    ms = (DWORD)((next - elapsed) * 1000 / freq.QuadPart);
++    if (ms && ms <= 1000) Sleep(ms);
++    TRACE("iface %p, slept %lu ms.\n", iface, (unsigned long)ms);
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE dxgi_output_TakeOwnership(IDXGIOutput6 *iface, IUnknown *device, BOOL exclusive)
+@@ -489,9 +502,19 @@ static HRESULT STDMETHODCALLTYPE dxgi_output_GetDisplaySurfaceData(IDXGIOutput6
+ 
+ static HRESULT STDMETHODCALLTYPE dxgi_output_GetFrameStatistics(IDXGIOutput6 *iface, DXGI_FRAME_STATISTICS *stats)
+ {
+-    FIXME("iface %p, stats %p stub!\n", iface, stats);
+-
+-    return E_NOTIMPL;
++    /* wine-mao: synthetic 60 Hz statistics so apps that poll for a new frame actually advance. */
++    static UINT present_count;
++    LARGE_INTEGER now;
++
++    if (!stats) return E_INVALIDARG;
++    QueryPerformanceCounter(&now);
++    stats->PresentCount = present_count;
++    stats->PresentRefreshCount = present_count;
++    stats->SyncRefreshCount = present_count;
++    stats->SyncQPCTime.QuadPart = now.QuadPart;
++    stats->SyncGPUTime.QuadPart = 0;
++    present_count++;
++    return S_OK;
+ }
+ 
+ /* IDXGIOutput1 methods */
+-- 
+2.56.0
+

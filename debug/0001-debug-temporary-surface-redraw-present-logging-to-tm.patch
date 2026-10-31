@@ -1,0 +1,337 @@
+From dfbe48c52769726bcddfe85ac642b46e13015fae Mon Sep 17 00:00:00 2001
+From: Yagafgaf <Yagafgaf@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 18:54:58 +0300
+Subject: [PATCH] debug: temporary surface/redraw/present logging to
+ /tmp/wine-surface.log
+
+Diagnostic instrumentation used to prove that Nexus 4 never calls InvalidateRect.
+Not for regular builds: it opens a log file on every paint/message.
+---
+ dlls/win32u/dce.c         | 38 +++++++++++++++++++++++++++++++++++++
+ dlls/win32u/message.c     | 30 +++++++++++++++++++++++++++++
+ dlls/win32u/window.c      | 20 ++++++++++++++++++++
+ dlls/wined3d/swapchain.c  | 27 ++++++++++++++++++++++++++
+ dlls/winex11.drv/bitblt.c | 40 +++++++++++++++++++++++++++++++++++++++
+ dlls/winex11.drv/init.c   |  4 ++++
+ 6 files changed, 159 insertions(+)
+
+diff --git a/dlls/win32u/dce.c b/dlls/win32u/dce.c
+index 5043544..fc94509 100644
+--- a/dlls/win32u/dce.c
++++ b/dlls/win32u/dce.c
+@@ -34,6 +34,24 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(win);
+ 
++/* TEMPORARY diagnostics: append surface flush decisions to a file so they can be
++ * inspected without WINEDEBUG (the plugin host is started by the DAW). */
++static void wsurf_log( const char *fmt, ... )
++{
++    static int disabled;
++    va_list ap;
++    FILE *f;
++
++    if (disabled || !(f = fopen( "/tmp/wine-surface.log", "a" ))) { disabled = 1; return; }
++    fprintf( f, "%lu %lu ", (unsigned long)HandleToUlong( NtCurrentTeb()->ClientId.UniqueProcess ),
++             (unsigned long)NtGetTickCount() );
++    va_start( ap, fmt );
++    vfprintf( f, fmt, ap );
++    va_end( ap );
++    fputc( '\n', f );
++    fclose( f );
++}
++
+ struct dce
+ {
+     struct list entry;         /* entry in global DCE list */
+@@ -622,6 +640,10 @@ void window_surface_flush( struct window_surface *surface )
+     RECT dirty = surface->rect, bounds;
+     void *color_bits;
+ 
++    wsurf_log( "flush enter hwnd %p surface %p bounds %ld,%ld-%ld,%ld clip %p", surface->hwnd, surface,
++               surface->bounds.left, surface->bounds.top, surface->bounds.right, surface->bounds.bottom,
++               surface->clip_region );
++
+     window_surface_lock( surface );
+ 
+     /* align bounds / dirty rect to help with 1bpp shape bitmap updates */
+@@ -640,10 +662,17 @@ void window_surface_flush( struct window_surface *surface )
+         TRACE( "Flushing hwnd %p, surface %p %s, bounds %s, dirty %s\n", surface->hwnd, surface,
+                wine_dbgstr_rect( &surface->rect ), wine_dbgstr_rect( &surface->bounds ), wine_dbgstr_rect( &dirty ) );
+ 
++        wsurf_log( "  copy hwnd %p dirty %ld,%ld-%ld,%ld", surface->hwnd,
++                   dirty.left, dirty.top, dirty.right, dirty.bottom );
++
+         if (surface->funcs->flush( surface, &surface->rect, &dirty, color_info, color_bits,
+                                    shape_changed, shape_info, shape_bits ))
+             reset_bounds( &surface->bounds );
+     }
++    else
++    {
++        wsurf_log( "  skip hwnd %p (empty bounds or no bits)", surface->hwnd );
++    }
+ 
+     window_surface_unlock( surface );
+ }
+@@ -693,10 +722,15 @@ void window_surface_set_clip( struct window_surface *surface, HRGN clip_region )
+     else if (clip_region && !NtGdiEqualRgn( clip_region, surface->clip_region ))
+     {
+         WINEREGION *data;
++        RECT clip_box;
+ 
+         TRACE( "hwnd %p, surface %p %s, setting clip region %p\n", surface->hwnd, surface,
+                wine_dbgstr_rect( &surface->rect ), clip_region );
+ 
++        NtGdiGetRgnBox( clip_region, &clip_box );
++        wsurf_log( "clip hwnd %p region %p box %ld,%ld-%ld,%ld", surface->hwnd, clip_region,
++                   clip_box.left, clip_box.top, clip_box.right, clip_box.bottom );
++
+         if (!surface->clip_region) surface->clip_region = NtGdiCreateRectRgn( 0, 0, 0, 0 );
+         NtGdiCombineRgn( surface->clip_region, clip_region, 0, RGN_COPY );
+ 
+@@ -1860,6 +1894,10 @@ BOOL WINAPI NtUserRedrawWindow( HWND hwnd, const RECT *rect, HRGN hrgn, UINT fla
+ 
+     if (!hwnd) hwnd = get_desktop_window();
+ 
++    if (flags)
++        wsurf_log( "redraw hwnd %p flags %04x rect %s", hwnd, flags,
++                   rect ? wine_dbgstr_rect( rect ) : "-" );
++
+     if (flags & RDW_UPDATENOW) update_now( hwnd, flags );
+     else if (flags & RDW_ERASENOW) erase_now( hwnd, flags );
+ 
+diff --git a/dlls/win32u/message.c b/dlls/win32u/message.c
+index 8c9a2aa..d11d3e6 100644
+--- a/dlls/win32u/message.c
++++ b/dlls/win32u/message.c
+@@ -3559,6 +3559,23 @@ BOOL WINAPI NtUserWaitMessage(void)
+ /***********************************************************************
+  *           NtUserPeekMessage  (win32u.@)
+  */
++/* TEMPORARY diagnostics, see dce.c */
++static void wsurf_log( const char *fmt, ... )
++{
++    static int disabled;
++    va_list ap;
++    FILE *f;
++
++    if (disabled || !(f = fopen( "/tmp/wine-surface.log", "a" ))) { disabled = 1; return; }
++    fprintf( f, "%lu %lu ", (unsigned long)HandleToUlong( NtCurrentTeb()->ClientId.UniqueProcess ),
++             (unsigned long)NtGetTickCount() );
++    va_start( ap, fmt );
++    vfprintf( f, fmt, ap );
++    va_end( ap );
++    fputc( '\n', f );
++    fclose( f );
++}
++
+ BOOL WINAPI NtUserPeekMessage( MSG *msg_out, HWND hwnd, UINT first, UINT last, UINT flags )
+ {
+     struct peek_message_filter filter = {.hwnd = hwnd, .first = first, .last = last, .flags = flags};
+@@ -3592,6 +3609,19 @@ BOOL WINAPI NtUserPeekMessage( MSG *msg_out, HWND hwnd, UINT first, UINT last, U
+ 
+     check_for_driver_events();
+ 
++    switch (msg.message)
++    {
++    case WM_PAINT: case WM_TIMER: case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP:
++    case WM_SHOWWINDOW: case WM_SIZE: case WM_SETCURSOR: case WM_ACTIVATE:
++    case WM_NCACTIVATE: case WM_ERASEBKGND: case WM_DISPLAYCHANGE: case WM_THEMECHANGED:
++    case WM_USER + 123:
++        wsurf_log( "peek msg %04x hwnd %p wp %llx", msg.message, msg.hwnd,
++                   (unsigned long long)msg.wParam );
++        break;
++    default:
++        break;
++    }
++
+     /* copy back our internal safe copy of message data to msg_out.
+      * msg_out is a variable from the *program*, so it can't be used
+      * internally as it can get "corrupted" by our use of SendMessage()
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index 7e30b27..c7e1afc 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -34,6 +34,23 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(win);
+ 
++/* TEMPORARY diagnostics, see dce.c */
++static void wsurf_log( const char *fmt, ... )
++{
++    static int disabled;
++    va_list ap;
++    FILE *f;
++
++    if (disabled || !(f = fopen( "/tmp/wine-surface.log", "a" ))) { disabled = 1; return; }
++    fprintf( f, "%lu %lu ", (unsigned long)HandleToUlong( NtCurrentTeb()->ClientId.UniqueProcess ),
++             (unsigned long)NtGetTickCount() );
++    va_start( ap, fmt );
++    vfprintf( f, fmt, ap );
++    va_end( ap );
++    fputc( '\n', f );
++    fclose( f );
++}
++
+ #define USER_HANDLE_TO_INDEX(hwnd) ((LOWORD(hwnd) - FIRST_USER_HANDLE) >> 1)
+ #define USER_HANDLE_FROM_INDEX(index, generation) UlongToHandle( (index << 1) + FIRST_USER_HANDLE + (generation << 16) )
+ 
+@@ -411,6 +428,7 @@ void *client_surface_create( const struct client_surface_funcs *funcs, HWND hwnd
+ 
+     TRACE( "created %s, format %d, raw %u, toplevel %p, virtual_rect %s, monitor_rect %s\n", debugstr_client_surface( surface ),
+            format, raw, toplevel, wine_dbgstr_rect( &surface->virtual_rect ), wine_dbgstr_rect( &surface->monitor_rect ) );
++    wsurf_log( "client create surface %p hwnd %p toplevel %p format %d raw %d", surface, hwnd, toplevel, format, raw );
+     return surface;
+ }
+ 
+@@ -474,6 +492,7 @@ void flush_client_surfaces(void)
+ 
+         if (!surface || (int)(now - copy->time) < pending_copy_delays[copy->stage]) continue;
+ 
++        wsurf_log( "client recopy stage %u hwnd %p offscreen %d", copy->stage, surface->hwnd, surface->offscreen );
+         if ((hwnd = surface->hwnd) && surface->offscreen &&
+             (hdc = NtUserGetDCEx( hwnd, 0, DCX_CACHE | DCX_USESTYLE )))
+         {
+@@ -495,6 +514,7 @@ void client_surface_present( struct client_surface *surface )
+     HDC hdc = 0;
+     HWND hwnd;
+ 
++    wsurf_log( "client present surface %p offscreen %d hwnd %p", surface, surface->offscreen, surface->hwnd );
+     pthread_mutex_lock( &surfaces_lock );
+     if ((hwnd = surface->hwnd))
+     {
+diff --git a/dlls/wined3d/swapchain.c b/dlls/wined3d/swapchain.c
+index 6d602b5..2e6f479 100644
+--- a/dlls/wined3d/swapchain.c
++++ b/dlls/wined3d/swapchain.c
+@@ -27,6 +27,23 @@
+ WINE_DEFAULT_DEBUG_CHANNEL(d3d);
+ WINE_DECLARE_DEBUG_CHANNEL(d3d_perf);
+ 
++/* TEMPORARY diagnostics: log swapchain presents to a file (no WINEDEBUG available). */
++static void wsurf_log( const char *fmt, ... )
++{
++    static int disabled;
++    va_list ap;
++    FILE *f;
++
++    if (disabled || !(f = fopen( "/tmp/wine-surface.log", "a" ))) { disabled = 1; return; }
++    fprintf( f, "%lu %lu ", (unsigned long)HandleToUlong( NtCurrentTeb()->ClientId.UniqueProcess ),
++             (unsigned long)NtGetTickCount() );
++    va_start( ap, fmt );
++    vfprintf( f, fmt, ap );
++    va_end( ap );
++    fputc( '\n', f );
++    fclose( f );
++}
++
+ static BOOL set_window_present_rect(HWND hwnd, UINT x, UINT y, UINT width, UINT height)
+ {
+     RECT rect = {x, y, x + width, y + height};
+@@ -227,6 +244,9 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
+     if (flags)
+         FIXME("Ignoring flags %#x.\n", flags);
+ 
++    wsurf_log( "d3d present swapchain %p win %p device_win %p", swapchain, swapchain->win_handle,
++               swapchain->state.device_window );
++
+     if (!(swapchain->state.desc.flags & WINED3D_SWAPCHAIN_FRAME_LATENCY_WAITABLE_OBJECT))
+     {
+         /* Limit input latency by limiting the number of presents that we can
+@@ -448,6 +468,10 @@ static void swapchain_blit_gdi(struct wined3d_swapchain *swapchain,
+     TRACE("swapchain %p, context %p, src_rect %s, dst_rect %s.\n",
+             swapchain, context, wine_dbgstr_rect(src_rect), wine_dbgstr_rect(dst_rect));
+ 
++    wsurf_log( "  gdi blit swapchain %p win %p src %ld,%ld-%ld,%ld dst %ld,%ld-%ld,%ld", swapchain,
++               swapchain->win_handle, src_rect->left, src_rect->top, src_rect->right, src_rect->bottom,
++               dst_rect->left, dst_rect->top, dst_rect->right, dst_rect->bottom );
++
+     if (!once++)
+         FIXME("Using GDI present.\n");
+ 
+@@ -1271,6 +1295,9 @@ static void swapchain_vk_present(struct wined3d_swapchain *swapchain, const RECT
+ 
+     context_vk = wined3d_context_vk(context_acquire(swapchain->device, back_buffer, 0));
+ 
++    wsurf_log( "  vk present swapchain %p vk_swapchain %p partial %d", swapchain,
++               swapchain_vk->vk_swapchain, swapchain_present_is_partial_copy(swapchain, dst_rect) );
++
+     if (!swapchain_vk->vk_swapchain || swapchain_present_is_partial_copy(swapchain, dst_rect))
+     {
+         swapchain_blit_gdi(swapchain, &context_vk->c, src_rect, dst_rect);
+diff --git a/dlls/winex11.drv/bitblt.c b/dlls/winex11.drv/bitblt.c
+index 1f91040..f1a784c 100644
+--- a/dlls/winex11.drv/bitblt.c
++++ b/dlls/winex11.drv/bitblt.c
+@@ -52,6 +52,42 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(bitblt);
+ 
++/* TEMPORARY diagnostics: append surface flush decisions to a file so they can be
++ * inspected without WINEDEBUG (the plugin host is started by the DAW). */
++void x11_wsurf_log( const char *fmt, ... );
++static void wsurf_log( const char *fmt, ... )
++{
++    static int disabled;
++    va_list ap;
++    FILE *f;
++
++    if (disabled || !(f = fopen( "/tmp/wine-surface.log", "a" ))) { disabled = 1; return; }
++    fprintf( f, "%lu %lu ", (unsigned long)HandleToUlong( NtCurrentTeb()->ClientId.UniqueProcess ),
++             (unsigned long)NtGetTickCount() );
++    va_start( ap, fmt );
++    vfprintf( f, fmt, ap );
++    va_end( ap );
++    fputc( '\n', f );
++    fclose( f );
++}
++
++/* Same log, exported for other winex11 sources. */
++void x11_wsurf_log( const char *fmt, ... )
++{
++    static int disabled;
++    va_list ap;
++    FILE *f;
++
++    if (disabled || !(f = fopen( "/tmp/wine-surface.log", "a" ))) { disabled = 1; return; }
++    fprintf( f, "%lu %lu ", (unsigned long)HandleToUlong( NtCurrentTeb()->ClientId.UniqueProcess ),
++             (unsigned long)NtGetTickCount() );
++    va_start( ap, fmt );
++    vfprintf( f, fmt, ap );
++    va_end( ap );
++    fputc( '\n', f );
++    fclose( f );
++}
++
+ 
+ #define DST 0   /* Destination drawable */
+ #define SRC 1   /* Source drawable */
+@@ -1853,6 +1889,10 @@ static BOOL x11drv_surface_flush( struct window_surface *window_surface, const R
+                    dirty->top, rect->left + dirty->left, rect->top + dirty->top,
+                    dirty->right - dirty->left, dirty->bottom - dirty->top );
+ 
++    wsurf_log( "  x11 put hwnd %p window %#lx rect %ld,%ld-%ld,%ld dirty %ld,%ld-%ld,%ld",
++               window_surface->hwnd, surface->window, rect->left, rect->top, rect->right,
++               rect->bottom, dirty->left, dirty->top, dirty->right, dirty->bottom );
++
+     XFlush( gdi_display );
+ 
+     return TRUE;
+diff --git a/dlls/winex11.drv/init.c b/dlls/winex11.drv/init.c
+index cf032cb..2b8ebc4 100644
+--- a/dlls/winex11.drv/init.c
++++ b/dlls/winex11.drv/init.c
+@@ -386,6 +386,10 @@ static void X11DRV_client_surface_present( struct client_surface *client, HDC hd
+     Drawable window;
+     HRGN region;
+ 
++    {
++        extern void x11_wsurf_log( const char *fmt, ... );
++        x11_wsurf_log( "drv client present hdc %p hwnd %p toplevel %p", hdc, hwnd, toplevel );
++    }
+     if (!hdc) return;
+     window = X11DRV_get_whole_window( toplevel );
+ 
+-- 
+2.56.0
+

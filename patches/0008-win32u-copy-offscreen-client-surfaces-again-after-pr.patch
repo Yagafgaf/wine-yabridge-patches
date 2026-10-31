@@ -1,0 +1,135 @@
+From 71473a928bcde6277aa88f1e12a78b4fff56cd84 Mon Sep 17 00:00:00 2001
+From: Yagafgaf <Yagafgaf@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 13:05:01 +0300
+Subject: [PATCH] win32u: copy offscreen client surfaces again after present
+
+An offscreen client surface (Vulkan/GL in a child window, e.g. a plugin
+editor embedded by yabridge) is copied into its toplevel right after the
+driver present call. Mesa's X11 WSI sends the frame from its own queue
+thread, so the copy can still see the previous frame; if no other frame
+follows, the window keeps showing stale content (Serum 2 wavetable view
+stayed old until the next click). Copy such surfaces again 16, 50 and
+150 ms after the last present, from flush_window_surfaces().
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/win32u/dce.c            |  2 ++
+ dlls/win32u/win32u_private.h |  1 +
+ dlls/win32u/window.c         | 69 +++++++++++++++++++++++++++++++++++-
+ 3 files changed, 71 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/win32u/dce.c b/dlls/win32u/dce.c
+index 67d3dc8..5043544 100644
+--- a/dlls/win32u/dce.c
++++ b/dlls/win32u/dce.c
+@@ -759,6 +759,8 @@ void flush_window_surfaces( BOOL idle )
+     DWORD now;
+     struct window_surface *surface;
+ 
++    flush_client_surfaces();
++
+     pthread_mutex_lock( &surfaces_lock );
+     now = NtGetTickCount();
+     if (idle) last_idle = now;
+diff --git a/dlls/win32u/win32u_private.h b/dlls/win32u/win32u_private.h
+index 2c92515..046717d 100644
+--- a/dlls/win32u/win32u_private.h
++++ b/dlls/win32u/win32u_private.h
+@@ -330,6 +330,7 @@ extern HWND get_progman_window(void);
+ extern HWND get_taskman_window(void);
+ extern BOOL is_client_surface_window( struct client_surface *surface, HWND hwnd );
+ extern void client_surface_update( struct client_surface *surface );
++extern void flush_client_surfaces(void);
+ extern BOOL client_surface_set_color_space( struct client_surface *surface, VkColorSpaceKHR color_space );
+ extern BOOL client_surface_get_size( struct client_surface *surface, SIZE *virtual_size, SIZE *monitor_size );
+ extern void use_window_client_surface( struct client_surface *surface, BOOL use );
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index 03ce398..7e30b27 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -427,6 +427,69 @@ void client_surface_release( struct client_surface *surface )
+     pthread_mutex_unlock( &surfaces_lock );
+ }
+ 
++/* An offscreen client surface is copied into its toplevel window right after the driver present
++ * call returns. The frame may not have reached the offscreen window yet at that point (e.g. Mesa's
++ * X11 WSI sends it from its own queue thread), so the copy can pick up the previous frame, and if
++ * no other frame follows, the window keeps showing stale content. Copy such surfaces again a bit
++ * later, from the window surface flush the GUI thread does whenever it goes idle. */
++static const DWORD pending_copy_delays[] = {16, 50, 150};  /* ms after the last present */
++static struct pending_copy
++{
++    struct client_surface *surface;  /* holds a reference */
++    DWORD                  time;     /* tick count of the last present */
++    UINT                   stage;    /* index into pending_copy_delays */
++} pending_copies[16];
++
++static void add_pending_copy_locked( struct client_surface *surface )
++{
++    struct pending_copy *copy, *slot = NULL;
++
++    for (copy = pending_copies; copy < pending_copies + ARRAY_SIZE(pending_copies); copy++)
++    {
++        if (copy->surface == surface) break;
++        if (!copy->surface && !slot) slot = copy;
++    }
++    if (copy == pending_copies + ARRAY_SIZE(pending_copies))
++    {
++        if (!(copy = slot)) return;
++        InterlockedIncrement( &surface->ref );
++        copy->surface = surface;
++    }
++    copy->time = NtGetTickCount();
++    copy->stage = 0;
++}
++
++void flush_client_surfaces(void)
++{
++    struct pending_copy *copy;
++    DWORD now;
++
++    pthread_mutex_lock( &surfaces_lock );
++    now = NtGetTickCount();
++    for (copy = pending_copies; copy < pending_copies + ARRAY_SIZE(pending_copies); copy++)
++    {
++        struct client_surface *surface = copy->surface;
++        HWND hwnd;
++        HDC hdc;
++
++        if (!surface || (int)(now - copy->time) < pending_copy_delays[copy->stage]) continue;
++
++        if ((hwnd = surface->hwnd) && surface->offscreen &&
++            (hdc = NtUserGetDCEx( hwnd, 0, DCX_CACHE | DCX_USESTYLE )))
++        {
++            TRACE( "copying %s again, stage %u\n", debugstr_client_surface( surface ), copy->stage );
++            surface->funcs->present( surface, hdc );
++            NtUserReleaseDC( hwnd, hdc );
++        }
++        if (!hwnd || ++copy->stage == ARRAY_SIZE(pending_copy_delays))
++        {
++            copy->surface = NULL;
++            client_surface_release_locked( surface );
++        }
++    }
++    pthread_mutex_unlock( &surfaces_lock );
++}
++
+ void client_surface_present( struct client_surface *surface )
+ {
+     HDC hdc = 0;
+@@ -438,7 +501,11 @@ void client_surface_present( struct client_surface *surface )
+         client_surface_update_locked( surface );
+         if (surface->offscreen) hdc = NtUserGetDCEx( hwnd, 0, DCX_CACHE | DCX_USESTYLE );
+         surface->funcs->present( surface, hdc );
+-        if (hdc) NtUserReleaseDC( hwnd, hdc );
++        if (hdc)
++        {
++            NtUserReleaseDC( hwnd, hdc );
++            add_pending_copy_locked( surface );
++        }
+     }
+     pthread_mutex_unlock( &surfaces_lock );
+ }
+-- 
+2.56.0
+

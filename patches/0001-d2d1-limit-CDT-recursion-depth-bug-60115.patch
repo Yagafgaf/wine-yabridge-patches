@@ -1,0 +1,146 @@
+From 3d88ffa3417f3dc2623234859b395feb7939bc85 Mon Sep 17 00:00:00 2001
+From: Yagafgaf <Yagafgaf@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 15:41:41 +0300
+Subject: [PATCH 1/7] d2d1: limit CDT recursion depth (bug 60115)
+
+---
+ dlls/d2d1/geometry.c | 68 ++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 62 insertions(+), 6 deletions(-)
+
+diff --git a/dlls/d2d1/geometry.c b/dlls/d2d1/geometry.c
+index b6903d0..1a257be 100644
+--- a/dlls/d2d1/geometry.c
++++ b/dlls/d2d1/geometry.c
+@@ -258,8 +258,15 @@ struct d2d_cdt
+     size_t free_edge;
+ 
+     const D2D1_POINT_2F *vertices;
++
++    /* Shared recursion depth of the CDT helpers below. Degenerate geometry can
++     * make them recurse without end (Wine bug 60115), overflowing the stack and
++     * killing the whole process; the triangulation fails instead. */
++    unsigned int depth;
+ };
+ 
++#define D2D_CDT_MAX_DEPTH 2048
++
+ struct d2d_geometry_intersection
+ {
+     size_t figure_idx;
+@@ -2215,7 +2222,9 @@ fail:
+     return FALSE;
+ }
+ 
+-static BOOL d2d_cdt_fixup(struct d2d_cdt *cdt, const struct d2d_cdt_edge_ref *base_edge)
++static BOOL d2d_cdt_fixup(struct d2d_cdt *cdt, const struct d2d_cdt_edge_ref *base_edge);
++
++static BOOL d2d_cdt_fixup_impl(struct d2d_cdt *cdt, const struct d2d_cdt_edge_ref *base_edge)
+ {
+     struct d2d_cdt_edge_ref candidate, next, new_base;
+     unsigned int count = 0;
+@@ -2256,9 +2265,25 @@ static BOOL d2d_cdt_fixup(struct d2d_cdt *cdt, const struct d2d_cdt_edge_ref *ba
+     return TRUE;
+ }
+ 
+-static void d2d_cdt_cut_edges(struct d2d_cdt *cdt, struct d2d_cdt_edge_ref *end_edge,
++static BOOL d2d_cdt_fixup(struct d2d_cdt *cdt, const struct d2d_cdt_edge_ref *base_edge)
++{
++    BOOL ret;
++
++    if (cdt->depth >= D2D_CDT_MAX_DEPTH)
++    {
++        ERR("Recursion limit reached.\n");
++        return FALSE;
++    }
++    ++cdt->depth;
++    ret = d2d_cdt_fixup_impl(cdt, base_edge);
++    --cdt->depth;
++    return ret;
++}
++
++static BOOL d2d_cdt_cut_edges(struct d2d_cdt *cdt, struct d2d_cdt_edge_ref *end_edge,
+         const struct d2d_cdt_edge_ref *base_edge, size_t start_vertex, size_t end_vertex)
+ {
++    BOOL ret;
+     struct d2d_cdt_edge_ref next;
+     float ccw;
+ 
+@@ -2266,25 +2291,39 @@ static void d2d_cdt_cut_edges(struct d2d_cdt *cdt, struct d2d_cdt_edge_ref *end_
+     if (d2d_cdt_edge_destination(cdt, &next) == end_vertex)
+     {
+         *end_edge = next;
+-        return;
++        return TRUE;
+     }
+ 
+     ccw = d2d_cdt_ccw(cdt, d2d_cdt_edge_destination(cdt, &next), end_vertex, start_vertex);
+     if (ccw == 0.0f)
+     {
+         *end_edge = next;
+-        return;
++        return TRUE;
+     }
+ 
+     if (ccw > 0.0f)
+         d2d_cdt_edge_next_left(cdt, &next, &next);
+ 
++    if (cdt->depth >= D2D_CDT_MAX_DEPTH)
++    {
++        ERR("Recursion limit reached.\n");
++        return FALSE;
++    }
++
+     d2d_cdt_edge_sym(&next, &next);
+-    d2d_cdt_cut_edges(cdt, end_edge, &next, start_vertex, end_vertex);
++    ++cdt->depth;
++    ret = d2d_cdt_cut_edges(cdt, end_edge, &next, start_vertex, end_vertex);
++    --cdt->depth;
++    if (!ret)
++        return FALSE;
+     d2d_cdt_destroy_edge(cdt, &next);
++    return TRUE;
+ }
+ 
+ static BOOL d2d_cdt_insert_segment(struct d2d_cdt *cdt, struct d2d_geometry *geometry,
++        const struct d2d_cdt_edge_ref *origin, struct d2d_cdt_edge_ref *edge, size_t end_vertex);
++
++static BOOL d2d_cdt_insert_segment_impl(struct d2d_cdt *cdt, struct d2d_geometry *geometry,
+         const struct d2d_cdt_edge_ref *origin, struct d2d_cdt_edge_ref *edge, size_t end_vertex)
+ {
+     struct d2d_cdt_edge_ref base_edge, current, new_origin, next, target;
+@@ -2317,7 +2356,8 @@ static BOOL d2d_cdt_insert_segment(struct d2d_cdt *cdt, struct d2d_geometry *geo
+             d2d_cdt_edge_next_left(cdt, &base_edge, &current);
+ 
+             d2d_cdt_edge_sym(&base_edge, &base_edge);
+-            d2d_cdt_cut_edges(cdt, &target, &base_edge, d2d_cdt_edge_origin(cdt, origin), end_vertex);
++            if (!d2d_cdt_cut_edges(cdt, &target, &base_edge, d2d_cdt_edge_origin(cdt, origin), end_vertex))
++                return FALSE;
+             d2d_cdt_destroy_edge(cdt, &base_edge);
+ 
+             if (!d2d_cdt_connect(cdt, &base_edge, &target, &current))
+@@ -2343,6 +2383,22 @@ static BOOL d2d_cdt_insert_segment(struct d2d_cdt *cdt, struct d2d_geometry *geo
+     }
+ }
+ 
++static BOOL d2d_cdt_insert_segment(struct d2d_cdt *cdt, struct d2d_geometry *geometry,
++        const struct d2d_cdt_edge_ref *origin, struct d2d_cdt_edge_ref *edge, size_t end_vertex)
++{
++    BOOL ret;
++
++    if (cdt->depth >= D2D_CDT_MAX_DEPTH)
++    {
++        ERR("Recursion limit reached.\n");
++        return FALSE;
++    }
++    ++cdt->depth;
++    ret = d2d_cdt_insert_segment_impl(cdt, geometry, origin, edge, end_vertex);
++    --cdt->depth;
++    return ret;
++}
++
+ static BOOL d2d_cdt_insert_segments(struct d2d_cdt *cdt, struct d2d_geometry *geometry)
+ {
+     size_t start_vertex, end_vertex, i, j, k;
+-- 
+2.56.0
+

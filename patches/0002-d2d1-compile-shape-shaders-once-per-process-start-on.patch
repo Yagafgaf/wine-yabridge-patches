@@ -1,0 +1,163 @@
+From 61ff835a05cfcb868108050306bb58e9dc9e8069 Mon Sep 17 00:00:00 2001
+From: Yagafgaf <Yagafgaf@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 15:41:41 +0300
+Subject: [PATCH 2/7] d2d1: compile shape shaders once per process, start on
+ factory creation
+
+---
+ dlls/d2d1/d2d1_private.h |  1 +
+ dlls/d2d1/device.c       | 90 +++++++++++++++++++++++++++++++++-------
+ dlls/d2d1/factory.c      |  1 +
+ 3 files changed, 77 insertions(+), 15 deletions(-)
+
+diff --git a/dlls/d2d1/d2d1_private.h b/dlls/d2d1/d2d1_private.h
+index ba6cea7..2f66873 100644
+--- a/dlls/d2d1/d2d1_private.h
++++ b/dlls/d2d1/d2d1_private.h
+@@ -783,6 +783,7 @@ void d2d_factory_register_effect(struct d2d_factory *factory,
+         struct d2d_effect_registration *effect);
+ HRESULT d2d_effect_property_get_uint32_value(const struct d2d_effect_properties *properties,
+         const struct d2d_effect_property *prop, UINT32 *value);
++void d2d_precompile_shape_shaders(void);
+ HRESULT d2d_device_init(struct d2d_device *device, ID2D1Factory1 *factory, IDXGIDevice *dxgi_device,
+         bool allow_get_dxgi_device);
+ 
+diff --git a/dlls/d2d1/device.c b/dlls/d2d1/device.c
+index 552d6d4..9b9a3f6 100644
+--- a/dlls/d2d1/device.c
++++ b/dlls/d2d1/device.c
+@@ -4804,44 +4804,104 @@ struct d2d_device *unsafe_impl_from_ID2D1Device(ID2D1Device1 *iface)
+     return CONTAINING_RECORD(iface, struct d2d_device, ID2D1Device6_iface);
+ }
+ 
+-HRESULT d2d_device_init(struct d2d_device *device, ID2D1Factory1 *factory, IDXGIDevice *dxgi_device,
+-    bool allow_get_dxgi_device)
++/* The shape shaders are the same for every device; compiling them takes tens
++ * of milliseconds, so compile them once per process and share the blobs. */
++static INIT_ONCE shape_shaders_once = INIT_ONCE_STATIC_INIT;
++static ID3D10Blob *shape_shaders_vs[ARRAY_SIZE(shape_info)];
++static ID3D10Blob *shape_shaders_ps;
++static HRESULT shape_shaders_hr;
++
++static BOOL WINAPI compile_shape_shaders(INIT_ONCE *once, void *param, void **context)
+ {
+     HRESULT hr;
+-    ID3D10Blob *compiled;
+-
+-    device->ID2D1Device6_iface.lpVtbl = &d2d_device_vtbl;
+-    device->refcount = 1;
+-    device->factory = factory;
+-    ID2D1Factory1_AddRef(device->factory);
+-    device->dxgi_device = dxgi_device;
+-    IDXGIDevice_AddRef(device->dxgi_device);
+-    device->allow_get_dxgi_device = allow_get_dxgi_device;
+ 
+     for (unsigned int i = 0; i < ARRAY_SIZE(shape_info); ++i)
+     {
+         const struct shape_info *si = &shape_info[i];
+ 
+         if (FAILED(hr = D3DCompile(si->vs_code, si->vs_code_size, si->name, NULL, NULL,
+-                "main", "vs_4_0", 0, 0, &compiled, NULL)))
++                "main", "vs_4_0", 0, 0, &shape_shaders_vs[i], NULL)))
+         {
+             WARN("Failed to compile shader for shape type %#x, hr %#lx.\n", si->shape_type, hr);
+-            return hr;
++            goto fail;
+         }
+-        device->precompiled_shape_vs[i] = compiled;
+     }
+ 
+     if (FAILED(hr = D3DCompile(shape_ps_code, sizeof(shape_ps_code) - 1, "ps", NULL, NULL,
+-            "main", "ps_4_0", 0, 0, &compiled, NULL)))
++            "main", "ps_4_0", 0, 0, &shape_shaders_ps, NULL)))
+     {
+         WARN("Failed to compile the pixel shader, hr %#lx.\n", hr);
++        goto fail;
++    }
++
++    return TRUE;
++
++fail:
++    for (unsigned int i = 0; i < ARRAY_SIZE(shape_info); ++i)
++    {
++        if (shape_shaders_vs[i])
++            ID3D10Blob_Release(shape_shaders_vs[i]);
++        shape_shaders_vs[i] = NULL;
++    }
++    shape_shaders_hr = hr;
++    return TRUE;
++}
++
++HRESULT d2d_device_init(struct d2d_device *device, ID2D1Factory1 *factory, IDXGIDevice *dxgi_device,
++    bool allow_get_dxgi_device)
++{
++    HRESULT hr;
++    ID3D10Blob *compiled;
++
++    device->ID2D1Device6_iface.lpVtbl = &d2d_device_vtbl;
++    device->refcount = 1;
++    device->factory = factory;
++    ID2D1Factory1_AddRef(device->factory);
++    device->dxgi_device = dxgi_device;
++    IDXGIDevice_AddRef(device->dxgi_device);
++    device->allow_get_dxgi_device = allow_get_dxgi_device;
++
++    InitOnceExecuteOnce(&shape_shaders_once, compile_shape_shaders, NULL, NULL);
++    if (FAILED(hr = shape_shaders_hr))
+         return hr;
++
++    for (unsigned int i = 0; i < ARRAY_SIZE(shape_info); ++i)
++    {
++        ID3D10Blob_AddRef(compiled = shape_shaders_vs[i]);
++        device->precompiled_shape_vs[i] = compiled;
+     }
++    ID3D10Blob_AddRef(compiled = shape_shaders_ps);
+     device->precompiled_shape_ps = compiled;
+ 
+     return S_OK;
+ }
+ 
++static DWORD WINAPI precompile_shape_shaders_proc(void *module)
++{
++    InitOnceExecuteOnce(&shape_shaders_once, compile_shape_shaders, NULL, NULL);
++    FreeLibraryAndExitThread(module, 0);
++}
++
++/* Called on factory creation, so that the shaders are usually ready by the
++ * time the first render target is created. */
++void d2d_precompile_shape_shaders(void)
++{
++    static LONG started;
++    HMODULE module;
++    HANDLE thread;
++
++    if (InterlockedCompareExchange(&started, 1, 0))
++        return;
++    /* The thread keeps d2d1 loaded until it is done. */
++    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
++            (const WCHAR *)precompile_shape_shaders_proc, &module))
++        return;
++    if ((thread = CreateThread(NULL, 0, precompile_shape_shaders_proc, module, 0, NULL)))
++        CloseHandle(thread);
++    else
++        FreeLibrary(module);
++}
++
+ HRESULT d2d_device_add_indexed_object(struct d2d_indexed_objects *objects,
+         const GUID *id, IUnknown *object)
+ {
+diff --git a/dlls/d2d1/factory.c b/dlls/d2d1/factory.c
+index 80c1476..3126076 100644
+--- a/dlls/d2d1/factory.c
++++ b/dlls/d2d1/factory.c
+@@ -1383,6 +1383,7 @@ HRESULT WINAPI D2D1CreateFactory(D2D1_FACTORY_TYPE factory_type, REFIID iid,
+         return E_OUTOFMEMORY;
+ 
+     d2d_factory_init(object, factory_type, factory_options);
++    d2d_precompile_shape_shaders();
+ 
+     TRACE("Created factory %p.\n", object);
+ 
+-- 
+2.56.0
+
