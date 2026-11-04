@@ -1,7 +1,7 @@
 From 61ff835a05cfcb868108050306bb58e9dc9e8069 Mon Sep 17 00:00:00 2001
 From: Yagafgaf <Yagafgaf@users.noreply.github.com>
 Date: Thu, 29 Oct 2026 15:41:41 +0300
-Subject: [PATCH 2/7] d2d1: compile shape shaders once per process, start on
+Subject: [PATCH 02/10] d2d1: compile shape shaders once per process, start on
  factory creation
 
 ---

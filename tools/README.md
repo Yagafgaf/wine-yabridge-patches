@@ -31,8 +31,10 @@ Sources only, no binaries. Build: `winegcc -O2 -o <name>.exe <name>.c` (add
 | file | what it does |
 |---|---|
 | `d2dtest.c` | window + d2d1 render target + a frame of text; main benchmark for the d2d1/dwrite patches |
+| `bench.py` | repeatable timings: `run` writes a baseline JSON, `compare` prints before/after and exits 1 on a regression above the threshold |
 | `fonttest.c` | font/text creation |
 | `gltest.c` | OpenGL path for comparison |
+| `egl-swap-test.c` | what `eglSwapBuffers` does without a current context (Mesa returns `EGL_BAD_SURFACE`); reproduces the black VPS Avenger editor, patch 0010 |
 | `thread-cpu-timeline.py` | per-thread CPU of a process over time |
 | `thread-state-sampler.py` | which syscall/primitive each thread sleeps in |
 | `analyze-frame-lag.py`, `analyze-wave-lag.py` | frame/waveform lag from a series of screenshots |

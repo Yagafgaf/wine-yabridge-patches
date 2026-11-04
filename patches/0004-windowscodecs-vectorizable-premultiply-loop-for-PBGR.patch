@@ -1,7 +1,7 @@
 From 13d203f5f24df590d00ea6ab5b79a66b04343ad9 Mon Sep 17 00:00:00 2001
 From: Yagafgaf <Yagafgaf@users.noreply.github.com>
 Date: Thu, 29 Oct 2026 15:43:50 +0300
-Subject: [PATCH 4/7] windowscodecs: vectorizable premultiply loop for
+Subject: [PATCH 04/10] windowscodecs: vectorizable premultiply loop for
  PBGRA/PRGBA conversion
 
 ---

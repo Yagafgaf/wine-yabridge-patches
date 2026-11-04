@@ -1,0 +1,217 @@
+From edff403a00ec237b060db71152a4300ba7e2ba37 Mon Sep 17 00:00:00 2001
+From: Yagafgaf <Yagafgaf@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 19:54:41 +0300
+Subject: [PATCH] ole32: release the drop target when the window is already
+ gone
+
+Some applications destroy their editor window before calling
+RevokeDragDrop().  The window properties die with the window, so the
+early invalid-hwnd return leaked the 4 KB mapping holding the marshalled
+wrapper, the table-strong marshal reference on that wrapper, and the
+reference RegisterDragDrop() took on the application's drop target,
+which keeps that object alive.  u-he VST3 plugins do exactly this: one
+leaked mapping per editor open.
+
+Keep a record of what was registered so RevokeDragDrop() can still clean
+up after the HWND is gone; it keeps returning DRAGDROP_E_INVALIDHWND in
+that case, as Windows does.  Records of destroyed windows that never got
+revoked are purged when a new drop target gets registered; that purge
+only frees ole32's own mapping and marshal data and leaves the drop
+target alone, since it may run on another thread after the module
+implementing it has been unloaded.  The record list is protected by a
+critical section.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ dlls/ole32/ole2.c           | 127 ++++++++++++++++++++++++++++++++++++
+ dlls/ole32/tests/dragdrop.c |   1 +
+ 2 files changed, 128 insertions(+)
+
+diff --git a/dlls/ole32/ole2.c b/dlls/ole32/ole2.c
+index c18a46a..a34810e 100644
+--- a/dlls/ole32/ole2.c
++++ b/dlls/ole32/ole2.c
+@@ -367,6 +367,111 @@ static HRESULT create_stream_from_map(HANDLE map, IStream **stream)
+     return hr;
+ }
+ 
++/* Bookkeeping for drop targets registered through RegisterDragDrop().
++ *
++ * The marshalled drop target lives in a file mapping object whose handle is
++ * stored in a window property, and RevokeDragDrop() is what closes it.  Some
++ * applications destroy their editor window first and call RevokeDragDrop()
++ * afterwards; at that point the window (and with it the property) is gone, so
++ * the early "invalid hwnd" return would leak the mapping, the marshalled
++ * wrapper and the reference RegisterDragDrop() took on the drop target.  Keep
++ * our own record of what was registered so that revoke can still clean up.
++ *
++ * Records of windows that are already gone are purged whenever a new drop
++ * target gets registered.  That purge only frees what ole32 owns itself (the
++ * mapping and the marshal data): it may run on another thread, possibly after
++ * the module implementing the drop target has been unloaded, so the drop
++ * target is only released when the application revokes it itself. */
++struct droptarget_record
++{
++    HWND hwnd;
++    IDropTarget *target;
++    HANDLE map;
++    struct droptarget_record *next;
++};
++
++static struct droptarget_record *droptarget_records;
++
++static CRITICAL_SECTION droptarget_cs;
++static CRITICAL_SECTION_DEBUG droptarget_cs_debug =
++{
++    0, 0, &droptarget_cs,
++    { &droptarget_cs_debug.ProcessLocksList, &droptarget_cs_debug.ProcessLocksList },
++      0, 0, { (DWORD_PTR)(__FILE__ ": droptarget_cs") }
++};
++static CRITICAL_SECTION droptarget_cs = { &droptarget_cs_debug, -1, 0, 0, 0, 0 };
++
++static void free_droptarget_record( struct droptarget_record *record, BOOL release_target )
++{
++    IStream *stream;
++
++    if (release_target && record->target) IDropTarget_Release( record->target );
++    if (record->map)
++    {
++        if (SUCCEEDED( create_stream_from_map( record->map, &stream ) ))
++        {
++            CoReleaseMarshalData( stream );
++            IStream_Release( stream );
++        }
++        CloseHandle( record->map );
++    }
++    free( record );
++}
++
++static void add_droptarget_record( HWND hwnd, IDropTarget *target, HANDLE map )
++{
++    struct droptarget_record *record, *stale = NULL, **link = &droptarget_records;
++    struct droptarget_record *new_record = malloc( sizeof(*new_record) );
++
++    EnterCriticalSection( &droptarget_cs );
++    while ((record = *link))
++    {
++        /* Drop entries of windows that no longer exist, and a stale entry for
++         * this handle in case the HWND got recycled in the meantime. */
++        if (!IsWindow( record->hwnd ) || record->hwnd == hwnd)
++        {
++            *link = record->next;
++            record->next = stale;
++            stale = record;
++            continue;
++        }
++        link = &record->next;
++    }
++    if (new_record)
++    {
++        new_record->hwnd = hwnd;
++        new_record->target = target;
++        new_record->map = map;
++        new_record->next = droptarget_records;
++        droptarget_records = new_record;
++    }
++    LeaveCriticalSection( &droptarget_cs );
++
++    while ((record = stale))
++    {
++        stale = record->next;
++        free_droptarget_record( record, FALSE );
++    }
++}
++
++static struct droptarget_record *take_droptarget_record( HWND hwnd )
++{
++    struct droptarget_record *record, **link = &droptarget_records;
++
++    EnterCriticalSection( &droptarget_cs );
++    while ((record = *link))
++    {
++        if (record->hwnd == hwnd)
++        {
++            *link = record->next;
++            break;
++        }
++        link = &record->next;
++    }
++    LeaveCriticalSection( &droptarget_cs );
++    return record;
++}
++
+ /* This is to work around apps which break COM rules by not implementing
+  * IDropTarget::QueryInterface().  Windows doesn't expose this because it
+  * doesn't call CoMarshallInterface() in RegisterDragDrop().
+@@ -608,6 +713,7 @@ HRESULT WINAPI RegisterDragDrop(HWND hwnd, LPDROPTARGET pDropTarget)
+       IDropTarget_AddRef(pDropTarget);
+       SetPropW(hwnd, prop_oledroptarget, pDropTarget);
+       SetPropW(hwnd, prop_marshalleddroptarget, map);
++      add_droptarget_record(hwnd, pDropTarget, map);
+     }
+     else
+     {
+@@ -627,6 +733,7 @@ HRESULT WINAPI RegisterDragDrop(HWND hwnd, LPDROPTARGET pDropTarget)
+  */
+ HRESULT WINAPI RevokeDragDrop(HWND hwnd)
+ {
++  struct droptarget_record *record;
+   HANDLE map;
+   IStream *stream;
+   IDropTarget *drop_target;
+@@ -636,13 +743,29 @@ HRESULT WINAPI RevokeDragDrop(HWND hwnd)
+ 
+   if (!IsWindow(hwnd))
+   {
++    /* The window was destroyed before the drop target was revoked, so its
++     * properties are gone.  Clean up from our own record instead of leaking
++     * the mapping and the drop target, but still report the invalid window
++     * like Windows does. */
++    if ((record = take_droptarget_record(hwnd)))
++    {
++      WARN("window %p already destroyed, releasing its drop target\n", hwnd);
++      free_droptarget_record(record, TRUE);
++      return DRAGDROP_E_INVALIDHWND;
++    }
++
+     ERR("invalid hwnd %p\n", hwnd);
+     return DRAGDROP_E_INVALIDHWND;
+   }
+ 
+   /* no registration data */
+   if (!(map = get_droptarget_handle(hwnd)))
++  {
++    /* A recycled handle: the record belongs to a window that is gone, and
++     * its drop target may be from a module that has been unloaded since. */
++    if ((record = take_droptarget_record(hwnd))) free_droptarget_record(record, FALSE);
+     return DRAGDROP_E_NOTREGISTERED;
++  }
+ 
+   drop_target = GetPropW(hwnd, prop_oledroptarget);
+   if(drop_target) IDropTarget_Release(drop_target);
+@@ -658,6 +781,10 @@ HRESULT WINAPI RevokeDragDrop(HWND hwnd)
+   }
+   CloseHandle(map);
+ 
++  /* The properties just released everything, the record is only a lookup key
++   * here and owns nothing of its own anymore. */
++  if ((record = take_droptarget_record(hwnd))) free(record);
++
+   return hr;
+ }
+ 
+diff --git a/dlls/ole32/tests/dragdrop.c b/dlls/ole32/tests/dragdrop.c
+index 257019d..42c6a6b 100644
+--- a/dlls/ole32/tests/dragdrop.c
++++ b/dlls/ole32/tests/dragdrop.c
+@@ -697,6 +697,7 @@ static void test_Register_Revoke(void)
+ 
+     hr = RevokeDragDrop(hwnd);
+     ok(hr == DRAGDROP_E_INVALIDHWND, "got 0x%08lx\n", hr);
++    ok(droptarget_refs == 0, "DropTarget refs should be zero not %d\n", droptarget_refs);
+ 
+     OleUninitialize();
+ }
+-- 
+2.56.0
+

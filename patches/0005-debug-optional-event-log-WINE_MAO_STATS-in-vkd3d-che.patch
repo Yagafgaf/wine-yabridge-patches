@@ -1,7 +1,7 @@
-From 2f1838554fc63dbc1234215b20b1966aac1de7ac Mon Sep 17 00:00:00 2001
+From f408d9f15b52f7f62c18200e53fd3dafd4d65203 Mon Sep 17 00:00:00 2001
 From: Yagafgaf <Yagafgaf@users.noreply.github.com>
 Date: Thu, 29 Oct 2026 16:06:13 +0300
-Subject: [PATCH 5/7] debug: optional event log (WINE_MAO_STATS) in vkd3d
+Subject: [PATCH 05/10] debug: optional event log (WINE_MAO_STATS) in vkd3d
  checksum, d2d1, dwrite, WIC
 
 ---
@@ -9,9 +9,10 @@ Subject: [PATCH 5/7] debug: optional event log (WINE_MAO_STATS) in vkd3d
  dlls/dwrite/font.c                  |  2 +
  dlls/windowscodecs/converter.c      |  3 ++
  dlls/wined3d/wined3d_main.c         |  3 ++
+ include/Makefile.in                 |  1 +
  include/wine/mao_stats.h            | 59 +++++++++++++++++++++++++++++
  libs/vkd3d/libs/vkd3d-shader/dxbc.c |  4 ++
- 6 files changed, 76 insertions(+)
+ 7 files changed, 77 insertions(+)
  create mode 100644 include/wine/mao_stats.h
 
 diff --git a/dlls/d2d1/device.c b/dlls/d2d1/device.c
@@ -99,6 +100,18 @@ index f797f67..58437e2 100644
  #include "wined3d_gl.h"
  #include <d3d10.h>
  #include <d3d10_1shader.h>
+diff --git a/include/Makefile.in b/include/Makefile.in
+index 3f23c63..88b94fe 100644
+--- a/include/Makefile.in
++++ b/include/Makefile.in
+@@ -1133,6 +1133,7 @@ SOURCES = \
+ 	wine/itss.idl \
+ 	wine/list.h \
+ 	wine/lsass.idl \
++	wine/mao_stats.h \
+ 	wine/mfinternal.idl \
+ 	wine/mmsystem16.h \
+ 	wine/mscvpdb.h \
 diff --git a/include/wine/mao_stats.h b/include/wine/mao_stats.h
 new file mode 100644
 index 0000000..abc9885

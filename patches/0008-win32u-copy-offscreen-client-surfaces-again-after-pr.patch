@@ -1,7 +1,8 @@
-From 71473a928bcde6277aa88f1e12a78b4fff56cd84 Mon Sep 17 00:00:00 2001
+From 020b63a265f58a862fc971e3a3b7f8b2f25d3ad3 Mon Sep 17 00:00:00 2001
 From: Yagafgaf <Yagafgaf@users.noreply.github.com>
 Date: Fri, 30 Oct 2026 13:05:01 +0300
-Subject: [PATCH] win32u: copy offscreen client surfaces again after present
+Subject: [PATCH 08/10] win32u: copy offscreen client surfaces again after
+ present
 
 An offscreen client surface (Vulkan/GL in a child window, e.g. a plugin
 editor embedded by yabridge) is copied into its toplevel right after the

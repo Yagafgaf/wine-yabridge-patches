@@ -1,0 +1,56 @@
+From 8886d334b036c80a66467a2c50db0e74ff1bb643 Mon Sep 17 00:00:00 2001
+From: Yagafgaf <Yagafgaf@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 14:52:02 +0300
+Subject: [PATCH 10/10] win32u: bind the internal context around SwapBuffers()
+ without a current context
+
+SwapBuffers() is legal on Windows without a context being current, and some
+plugins rely on it: they draw a frame, call wglMakeCurrent( NULL, NULL ) and
+then swap.  The EGL drivers can only swap a surface that is current to some
+context, Mesa returns EGL_BAD_SURFACE for the others, the frame is silently
+dropped and the window stays black (VPS Avenger's editor: clicks work, nothing
+is drawn).
+
+Bind the thread's internal context to the drawable for the duration of the
+swap and restore the null surface afterwards.  Internal contexts are created
+configless, so any window surface accepts them.
+---
+ dlls/win32u/opengl.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/dlls/win32u/opengl.c b/dlls/win32u/opengl.c
+index 64884c7..c7a7af3 100644
+--- a/dlls/win32u/opengl.c
++++ b/dlls/win32u/opengl.c
+@@ -3134,6 +3134,7 @@ static BOOL win32u_wglSwapBuffers( HDC hdc )
+     struct opengl_context *context = NtCurrentTeb()->glContext;
+     const struct opengl_funcs *funcs = &display_funcs;
+     struct opengl_drawable *draw;
++    BOOL internal_current = FALSE;
+     int interval;
+     HWND hwnd;
+     BOOL ret;
+@@ -3149,8 +3150,20 @@ static BOOL win32u_wglSwapBuffers( HDC hdc )
+     if (context) opengl_drawable_add_ref( (draw = context->draw) );
+     else if (!(draw = get_window_current_drawable( hwnd ))) return FALSE;
+ 
++    /* SwapBuffers() is legal on Windows without a context being current, and some plugins rely
++     * on that: they draw a frame, call wglMakeCurrent( NULL, NULL ) and then swap. The EGL
++     * drivers can only swap a surface that is current to some context though, Mesa returns
++     * EGL_BAD_SURFACE for the others and the frame is silently dropped, leaving the window
++     * black. Bind the thread's internal context to the drawable for the swap and restore the
++     * null surface afterwards. Internal contexts are configless, so any window surface accepts
++     * them. */
++    if (!context && (internal_current = make_thread_context_current( NULL, draw )))
++        TRACE( "no current context, swapping %s with the internal one\n", debugstr_opengl_drawable( draw ) );
++
+     opengl_drawable_flush( draw, interval, 0 );
+     ret = opengl_drawable_swap( draw );
++
++    if (internal_current) make_thread_context_current( NULL, NULL );
+     opengl_drawable_release( draw );
+ 
+     return ret;
+-- 
+2.56.0
+

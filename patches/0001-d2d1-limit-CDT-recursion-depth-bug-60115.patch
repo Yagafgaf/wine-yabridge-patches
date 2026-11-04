@@ -1,7 +1,7 @@
 From 3d88ffa3417f3dc2623234859b395feb7939bc85 Mon Sep 17 00:00:00 2001
 From: Yagafgaf <Yagafgaf@users.noreply.github.com>
 Date: Thu, 29 Oct 2026 15:41:41 +0300
-Subject: [PATCH 1/7] d2d1: limit CDT recursion depth (bug 60115)
+Subject: [PATCH 01/10] d2d1: limit CDT recursion depth (bug 60115)
 
 ---
  dlls/d2d1/geometry.c | 68 ++++++++++++++++++++++++++++++++++++++++----

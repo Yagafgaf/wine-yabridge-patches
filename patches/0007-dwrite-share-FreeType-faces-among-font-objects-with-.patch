@@ -1,8 +1,8 @@
-From 13f1a0ffaf341905dd57a2f17c3a6d747a2c7f38 Mon Sep 17 00:00:00 2001
+From 76761014c098a034fa5eebeb9384a12027a453be Mon Sep 17 00:00:00 2001
 From: Yagafgaf <Yagafgaf@users.noreply.github.com>
 Date: Thu, 29 Oct 2026 16:13:21 +0300
-Subject: [PATCH 7/7] dwrite: share FreeType faces among font objects with the
- same data, keep idle ones cached
+Subject: [PATCH 07/10] dwrite: share FreeType faces among font objects with
+ the same data, keep idle ones cached
 
 ---
  dlls/dwrite/freetype.c | 155 ++++++++++++++++++++++++++++++++++++++---

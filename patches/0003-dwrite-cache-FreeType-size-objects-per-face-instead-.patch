@@ -1,7 +1,7 @@
 From 95587d8723383eafe765b4daca51e7680332b7dd Mon Sep 17 00:00:00 2001
 From: Yagafgaf <Yagafgaf@users.noreply.github.com>
 Date: Thu, 29 Oct 2026 15:43:50 +0300
-Subject: [PATCH 3/7] dwrite: cache FreeType size objects per face instead of
+Subject: [PATCH 03/10] dwrite: cache FreeType size objects per face instead of
  one per glyph call
 
 ---
